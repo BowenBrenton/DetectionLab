@@ -94,15 +94,9 @@ fix_eth1_static_ip() {
       return 0
     fi
   fi
-  # There's a fun issue where dhclient keeps messing with eth1 despite the fact
-  # that eth1 has a static IP set. We workaround this by setting a static DHCP lease.
-  if ! grep 'interface "eth1"' /etc/dhcp/dhclient.conf; then
-    echo -e 'interface "eth1" {
-      send host-name = gethostname();
-      send dhcp-requested-address 192.168.56.105;
-    }' >>/etc/dhcp/dhclient.conf
-    netplan apply
-  fi
+  # TODO: try to set correctly directly through vagrant net config
+  netplan set --origin-hint 90-disable-eth1-dhcp ethernets.eth1.dhcp4=false
+  netplan apply
 
   # Fix eth1 if the IP isn't set correctly
   ETH1_IP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
@@ -111,13 +105,25 @@ fix_eth1_static_ip() {
     ip link set dev eth1 down
     ip addr flush dev eth1
     ip link set dev eth1 up
-    ETH1_IP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-    if [ "$ETH1_IP" == "192.168.56.105" ]; then
-      echo "[$(date +%H:%M:%S)]: The static IP has been fixed and set to 192.168.56.105"
-    else
-      echo "[$(date +%H:%M:%S)]: Failed to fix the broken static IP for eth1. Exiting because this will cause problems with other VMs."
-      exit 1
-    fi
+    counter=0
+    while :; do
+      ETH1_IP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+      if [ "$ETH1_IP" == "192.168.56.105" ]; then
+        echo "[$(date +%H:%M:%S)]: The static IP has been fixed and set to 192.168.56.105"
+        break
+      else
+        if [ $counter -le 20 ]; then
+          let counter=counter+1
+          echo "[$(date +%H:%M:%S)]: Waiting for IP $counter/20 seconds"
+          sleep 1
+          continue
+        else
+          echo "[$(date +%H:%M:%S)]: Failed to fix the broken static IP for eth1. Exiting because this will cause problems with other VMs."
+          echo "[$(date +%H:%M:%S)]: eth1's current IP address is $ETH1_IP"
+          exit 1
+        fi
+      fi
+    done
   fi
 
   # Make sure we do have a DNS resolution
@@ -296,8 +302,8 @@ install_fleet_import_osquery_config() {
     mysql -uroot -pfleet -e "create database fleet;"
 
     # Always download the latest release of Fleet and Fleetctl
-    curl -s https://github.com/fleetdm/fleet/releases | grep _linux.tar.gz | grep href | grep -v orbit | grep -v fleetctl | cut -d '"' -f 2 | head -1 | sed 's#^#https://github.com#g'  | wget --progress=bar:force -i -
-    curl -s https://github.com/fleetdm/fleet/releases | grep _linux.tar.gz | grep href | grep fleetctl | cut -d '"' -f 2 | head -1 | sed 's#^#https://github.com#g' | wget --progress=bar:force -i -
+    curl -s https://api.github.com/repos/fleetdm/fleet/releases/latest | jq '.assets[] | select(.name|match("linux.tar.gz$")) | .browser_download_url' | sed 's/"//g' | grep fleetctl  | wget --progress=bar:force -i -
+    curl -s https://api.github.com/repos/fleetdm/fleet/releases/latest | jq '.assets[] | select(.name|match("linux.tar.gz$")) | .browser_download_url' | sed 's/"//g' | grep fleet | grep -v fleetctl | wget --progress=bar:force -i -
     tar -xvf fleet_*.tar.gz
     tar -xvf fleetctl_*.tar.gz
     cp fleetctl_*/fleetctl /usr/local/bin/fleetctl && chmod +x /usr/local/bin/fleetctl
@@ -380,7 +386,7 @@ install_zeek() {
   # Update APT repositories
   apt-get -qq -ym update
   # Install tools to build and configure Zeek
-  apt-get -qq -ym install zeek crudini
+  apt-get -qq -ym install zeek-lts crudini
   export PATH=$PATH:/opt/zeek/bin
   pip3 install zkg==2.1.1
   zkg refresh
@@ -451,10 +457,10 @@ install_zeek() {
 install_velociraptor() {
   echo "[$(date +%H:%M:%S)]: Installing Velociraptor..."
   if [ ! -d "/opt/velociraptor" ]; then
-    mkdir /opt/velociraptor
+    mkdir /opt/velociraptor || echo "Dir already exists"
   fi
   echo "[$(date +%H:%M:%S)]: Attempting to determine the URL for the latest release of Velociraptor"
-  LATEST_VELOCIRAPTOR_LINUX_URL=$(curl -sL https://github.com/Velocidex/velociraptor/releases/latest | grep linux-amd64 | grep href | head -1 | cut -d '"' -f 2 | sed 's#^#https://github.com#g')
+  LATEST_VELOCIRAPTOR_LINUX_URL=$(curl -sL https://github.com/Velocidex/velociraptor/releases/ | grep linux-amd64 | grep href | head -1 | cut -d '"' -f 2 | sed 's#^#https://github.com#g')
   echo "[$(date +%H:%M:%S)]: The URL for the latest release was extracted as $LATEST_VELOCIRAPTOR_LINUX_URL"
   echo "[$(date +%H:%M:%S)]: Attempting to download..."
   wget -P /opt/velociraptor --progress=bar:force "$LATEST_VELOCIRAPTOR_LINUX_URL"
@@ -471,6 +477,8 @@ install_velociraptor() {
   cp /vagrant/resources/velociraptor/server.config.yaml /opt/velociraptor
   echo "[$(date +%H:%M:%S)]: Creating Velociraptor dpkg..."
   ./velociraptor --config /opt/velociraptor/server.config.yaml debian server
+  echo "[$(date +%H:%M:%S)]: Cleanup velociraptor package building leftovers..."
+  rm -rf /opt/velociraptor/logs
   echo "[$(date +%H:%M:%S)]: Installing the dpkg..."
   if dpkg -i velociraptor_*_server.deb >/dev/null; then
     echo "[$(date +%H:%M:%S)]: Installation complete!"
@@ -584,11 +592,6 @@ install_guacamole() {
   echo "[$(date +%H:%M:%S)]: Guacamole installation complete!"
 }
 
-postinstall_tasks() {
-  # Ping DetectionLab server for usage statistics
-  curl -s -A "DetectionLab-logger" "https:/ping.detectionlab.network/logger" || echo "Unable to connect to ping.detectionlab.network"
-}
-
 configure_splunk_inputs() {
   echo "[$(date +%H:%M:%S)]: Configuring Splunk Inputs..."
   # Suricata
@@ -628,12 +631,15 @@ main() {
   install_zeek
   install_guacamole
   configure_splunk_inputs
-  postinstall_tasks
 }
 
 splunk_only() {
   install_splunk
   configure_splunk_inputs
+}
+
+velociraptor_only() {
+  install_velociraptor
 }
 
 # Allow custom modes via CLI args

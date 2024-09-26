@@ -51,10 +51,8 @@ $vraptorInstallScriptDownloadUrl = "https://raw.githubusercontent.com/clong/Dete
 $vraptorInstallScriptPath = 'C:\Users\vagrant\AppData\Local\Temp\install-velociraptor.ps1'
 If (-not (Test-Path $vraptorInstallScriptPath)) {
   Invoke-WebRequest -Uri "$vraptorInstallScriptDownloadUrl" -OutFile $vraptorInstallScriptPath
+  Set-Content -Path "C:\Users\vagrant\AppData\Local\Temp\install-velociraptor.ps1" -Value (get-content -Path "C:\Users\vagrant\AppData\Local\Temp\install-velociraptor.ps1" | Select-String -Pattern 'c:\\vagrant\\resources' -NotMatch)
   . $vraptorInstallScriptPath -update 1
 } Else {
-  Write-Host "$('[{0:HH:mm}]' -f (Get-Date)) Mimikatz was already installed. Moving On."
+  Write-Host "$('[{0:HH:mm}]' -f (Get-Date)) Velociraptor was already installed. Moving On."
 }
-
-
-
